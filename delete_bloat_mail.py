@@ -4,6 +4,7 @@ import os
 import sys
 import pickle
 import time
+import signal
 from textwrap import dedent
 from googleapiclient.discovery import build
 from google_auth_oauthlib.flow import InstalledAppFlow
@@ -19,8 +20,26 @@ except ImportError:
 SCOPES = ["https://www.googleapis.com/auth/gmail.modify"]
 BLOAT_FILE = "list-bloat.txt"
 WHITE_FILE = "list-white.txt"
+STOPPED = False  # флаг остановки
 
 
+# ────────────────────────────────────────────────
+# CTRL-C / SIGINT обработка
+# ────────────────────────────────────────────────
+def handle_interrupt(signum, frame):
+    global STOPPED
+    STOPPED = True
+    print("\n🛑 Прервано пользователем (Ctrl-C).")
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, handle_interrupt)
+signal.signal(signal.SIGTERM, handle_interrupt)
+
+
+# ────────────────────────────────────────────────
+# HELP
+# ────────────────────────────────────────────────
 def show_help():
     print(
         dedent(
@@ -57,6 +76,9 @@ def show_help():
     sys.exit(0)
 
 
+# ────────────────────────────────────────────────
+# GMAIL AUTH
+# ────────────────────────────────────────────────
 def get_service():
     creds = None
     if os.path.exists("token.pickle"):
@@ -66,15 +88,19 @@ def get_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                "client_secret.json", SCOPES
-            )
+            if not os.path.exists("client_secret.json"):
+                print("❌ Не найден client_secret.json — скачай его из Google Cloud Console.")
+                sys.exit(1)
+            flow = InstalledAppFlow.from_client_secrets_file("client_secret.json", SCOPES)
             creds = flow.run_local_server(port=0)
         with open("token.pickle", "wb") as token:
             pickle.dump(creds, token)
     return build("gmail", "v1", credentials=creds)
 
 
+# ────────────────────────────────────────────────
+# FILE OPS
+# ────────────────────────────────────────────────
 def ensure_default_files():
     if not os.path.exists(BLOAT_FILE):
         with open(BLOAT_FILE, "w", encoding="utf-8") as f:
@@ -105,6 +131,9 @@ def read_filters(path):
         return filters
 
 
+# ────────────────────────────────────────────────
+# GMAIL OPS
+# ────────────────────────────────────────────────
 def move_batch(service, msg_ids):
     if not msg_ids:
         return
@@ -115,7 +144,7 @@ def move_batch(service, msg_ids):
 def search_messages(service, query):
     results = service.users().messages().list(userId="me", q=query, maxResults=500).execute()
     messages = results.get("messages", [])
-    while "nextPageToken" in results:
+    while "nextPageToken" in results and not STOPPED:
         results = service.users().messages().list(
             userId="me", q=query, pageToken=results["nextPageToken"], maxResults=500
         ).execute()
@@ -125,6 +154,9 @@ def search_messages(service, query):
 
 def process_query(service, query, whitelist):
     """Live-обновление в одной строке"""
+    if STOPPED:
+        return 0
+
     def update_line(text):
         print(f"\r\033[K{text}", end="", flush=True)
 
@@ -139,6 +171,8 @@ def process_query(service, query, whitelist):
     white_ids = set()
     for w in whitelist:
         white_ids.update(search_messages(service, w))
+        if STOPPED:
+            return 0
 
     real_targets = [i for i in ids if i not in white_ids]
 
@@ -149,6 +183,8 @@ def process_query(service, query, whitelist):
         return 0
 
     for i in range(0, len(real_targets), 100):
+        if STOPPED:
+            return 0
         move_batch(service, real_targets[i : i + 100])
 
     update_line(f"🔍 {query} — ✅ {len(real_targets)} писем → корзина.")
@@ -157,6 +193,9 @@ def process_query(service, query, whitelist):
     return len(real_targets)
 
 
+# ────────────────────────────────────────────────
+# MAIN
+# ────────────────────────────────────────────────
 def main():
     if len(sys.argv) == 1 or sys.argv[1] in {"-h", "--help", "help"}:
         show_help()
@@ -175,10 +214,15 @@ def main():
     start = time.time()
     total = 0
 
-    for i, q in enumerate(bloat_filters, start=1):
-        total += process_query(service, q, white_filters)
+    try:
+        for i, q in enumerate(bloat_filters, start=1):
+            if STOPPED:
+                break
+            total += process_query(service, q, white_filters)
+    except KeyboardInterrupt:
+        handle_interrupt(None, None)
 
-    # аккуратно очищаем последнюю строку, если она была ❌
+    # очищаем последнюю строку
     print("\r\033[K", end="", flush=True)
 
     elapsed = time.time() - start
