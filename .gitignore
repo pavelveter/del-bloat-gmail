@@ -1,0 +1,30 @@
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.log
+
+# Virtualenv
+.venv/
+venv/
+env/
+
+# Credentials
+client_secret*.json
+token.pickle
+
+# Local config
+list-bloat.txt
+list-white.txt
+
+# OS garbage
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
